@@ -8,7 +8,6 @@ class Output:
     def __init__(self, translated_text, *alternatives):
         self.text = translated_text
         self.an = alternatives
-        asyncio.run(self.main())  # 运行异步方法
     
     async def main(self):
         # 创建并打印面板
