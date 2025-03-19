@@ -3,6 +3,7 @@ from rich.panel import Panel
 from rich.table import Table
 import sys
 import aiofiles  # 用于异步文件操作
+import importlib
 
 console = Console()  # 实例化Console对象
 
