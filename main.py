@@ -2,94 +2,179 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 import sys
-import aiofiles  # 用于异步文件操作
-import importlib
+import aiofiles
+import argparse
+import asyncio  # 添加异步事件循环支持
 
-console = Console()  # 实例化Console对象
+console = Console()
 
-class Output:
+class TranslationOutput:
+    """处理翻译结果输出的类"""
     def __init__(self, translated_text, *alternatives):
         self.text = translated_text
-        self.an = alternatives
+        self.alternatives = alternatives
     
-    async def main(self):
-        # 创建并打印面板
-        panel = Panel(self.text, title="翻译结果")
-        console.print(panel)  # 使用console打印面板
+    async def show(self):
+        """异步显示翻译结果"""
+        # 主翻译结果面板
+        main_panel = Panel(self.text, title="[bold green]翻译结果[/bold green]")
+        console.print(main_panel)
         
-        # 创建表格
-        antable = Table(title="其他翻译")
-        antable.add_column("序号")  # 修正拼写错误 culumn -> column
-        antable.add_column("翻译")
-        
-        # 添加行
-        for index, anais in enumerate(self.an):
-            antable.add_row(str(index), anais)  # 转换index为字符串
-        
-        # 打印表格
-        console.print(antable)
+        # 备选翻译表格
+        if self.alternatives:
+            table = Table(title="[bold yellow]备选翻译[/bold yellow]", show_header=True)
+            table.add_column("编号", style="cyan", width=6)
+            table.add_column("内容", style="magenta")
+            
+            for idx, alt in enumerate(self.alternatives, 1):
+                table.add_row(str(idx), alt)
+            
+            console.print(table)
 
-
-class GetInput:
-    """
-    处理多种输入方式的类，按照优先级获取输入内容
-    支持：命令行参数、文件输入、标准输入(包括管道)、交互式输入
-    """
+class InputHandler:
+    """统一输入处理类"""
     def __init__(self, args):
-        self.args = args  # 保存命令行参数
-        
-    async def _stdin(self):
-        """
-        从标准输入(stdin)读取内容，支持管道输入
-        例如: echo "hello" | python script.py
-        """
-        # 检查是否有管道输入
-        if not sys.stdin.isatty():  # 如果stdin不是终端，说明是管道输入
-            return sys.stdin.read()  # 直接读取stdin
-        return None  # 没有管道输入则返回None
+        self.args = args
+        self.input_sources = [
+            self._from_args,
+            self._from_file,
+            self._from_stdin,
+            self._from_interactive
+        ]
     
-    async def _input(self):
-        """
-        交互式获取用户输入，使用rich库美化提示
-        当其他输入方式都不可用时使用
-        """
-        # console.input不是异步的，但为了保持接口一致，使用async定义
-        return console.input("[cyan]请输入翻译内容：[/cyan]")
-    
-    async def _file(self):
-        """
-        从指定文件异步读取内容
-        如果文件不存在或读取出错，返回None
-        """
-        if hasattr(self.args, 'file') and self.args.file:
+    async def _from_args(self):
+        """从命令行参数获取输入"""
+        if getattr(self.args, 'text', None):
+            return self.args.text
+        return None
+
+    async def _from_file(self):
+        """异步读取文件内容"""
+        if getattr(self.args, 'file', None):
             try:
-                async with aiofiles.open(self.args.file, mode='r') as f:
+                async with aiofiles.open(self.args.file, 'r') as f:
                     return await f.read()
             except Exception as e:
-                console.print(f"[red]读取文件出错: {e}[/red]")
+                console.print(f"[red]文件读取错误: {e}[/red]")
         return None
-    
-    async def _con(self):
-        """
-        从命令行参数中获取直接提供的输入内容
-        例如: python script.py --input "hello world"
-        """
-        if hasattr(self.args, 'input') and self.args.input:
-            return self.args.input
+
+    async def _from_stdin(self):
+        """处理管道输入"""
+        if not sys.stdin.isatty():
+            return sys.stdin.read()
         return None
-    
-    async def main(self):
-        """
-        主方法：按优先级尝试不同的输入方式
-        优先级：命令行参数 > 文件输入 > 标准输入(管道) > 交互式输入
-        """
-        # 按优先级尝试不同的输入方式
-        methods = [self._con, self._file, self._stdin, self._input]
-        
-        for method in methods:
-            result = await method()
-            if result is not None:
-                return result
-        
-        # 如果所有方法都失败，返回空字符串
+
+    async def _from_interactive(self):
+        """交互式输入"""
+        return console.input("[bold cyan]请输入要翻译的内容: [/]")
+
+    async def get_content(self):
+        """按优先级获取输入内容"""
+        for source in self.input_sources:
+            if content := await source():
+                return content.strip()
         return ""
+
+class CommandHandler:
+    """命令行处理核心类"""
+    def __init__(self):
+        self.parser = self._create_parser()
+    
+    def _create_parser(self):
+        """创建参数解析器"""
+        parser = argparse.ArgumentParser(
+            description="多功能翻译工具",
+            add_help=False,
+            formatter_class=argparse.RawTextHelpFormatter
+        )
+
+        # 通用参数
+        parser.add_argument('--debug', action='store_true', help='调试模式')
+        parser.add_argument('-h', '--help', action='store_true', help='显示帮助信息')
+
+        # 子命令
+        subparsers = parser.add_subparsers(dest='command', title='可用命令')
+
+        # 翻译命令
+        trans_parser = subparsers.add_parser(
+            'trans', 
+            aliases=['t'],
+            help='执行翻译操作',
+            add_help=False
+        )
+        trans_parser.add_argument('-f', '--file', help='指定输入文件')
+        trans_parser.add_argument('text', nargs='*', help='要翻译的文本')
+
+        # 配置命令
+        config_parser = subparsers.add_parser(
+            'config',
+            aliases=['cfg'],
+            help='配置管理',
+            add_help=False
+        )
+        config_parser.add_argument('mainkey',nargs='?',help='配置主键')
+        config_parser.add_argument('subkey', nargs='?', help='配置次键')
+        config_parser.add_argument('value', nargs='?', help='配置值')
+
+        # 帮助命令
+        subparsers.add_parser(
+            'help',
+            help='显示帮助信息',
+            add_help=False
+        )
+
+        return parser
+
+    async def handle_config(self, args):
+        """处理配置命令"""
+        if args.help or not args.key:
+            console.print("[bold]配置管理:[/]")
+            console.print("  config [subkey] [value] - 设置配置项")
+            console.print(" config list - 列出所有配置")
+            return
+        # 这里添加实际的配置处理逻辑
+        console.print(f"[yellow]配置项 {args.mainkey}.{args.subkey} 已设置为 {args.value}[/yellow]")
+
+    async def handle_translation(self, args):
+        """处理翻译流程"""
+        input_handler = InputHandler(args)
+        content = await input_handler.get_content()
+        
+        if not content:
+            console.print("[red]错误: 没有输入内容[/red]")
+            return
+
+        # 这里添加实际的翻译逻辑，示例使用伪数据
+        translated = "Hello World"
+        alternatives
+        
+        output = TranslationOutput(translated, *alternatives)
+        await output.show()
+
+    async def execute(self):
+        """执行命令解析"""
+        args = self.parser.parse_args()
+
+        if args.help or args.command == 'help':
+            self.parser.print_help()
+            return
+
+        if args.debug:
+            console.print("[yellow]调试模式已启用[/yellow]")
+
+        try:
+            if args.command in ('config', 'cfg'):
+                await self.handle_config(args)
+            elif args.command in ('trans', 't'):
+                await self.handle_translation(args)
+            else:
+                self.parser.print_help()
+        except Exception as e:
+            console.print(f"[red]错误: {str(e)}[/red]")
+
+def main():
+    handler = CommandHandler()
+    asyncio.run(handler.execute())
+
+if __name__ == "__main__":
+    main()
